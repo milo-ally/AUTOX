@@ -34,7 +34,7 @@ export OPENAI_API_KEY=sk-your-key-here
 microclaw --model gpt-4o --boot
 ```
 
-> **First time?** Use `--boot` to start a fresh session. Without it, microclaw resumes your latest session automatically.
+> **First time?** Use `--boot` to start. Without it, microclaw resumes your latest session automatically.
 
 ### Windows
 
