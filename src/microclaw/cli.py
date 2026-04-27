@@ -247,14 +247,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated list of allowed tools (default: all)",
     )
     parser.add_argument(
-        "--boot", "-b",
-        action="store_true",
-        help="Start a fresh session (default: resume latest session). Use this on first run.",
-    )
-    parser.add_argument(
         "--resume", "-r",
         default=None,
-        help="Resume a specific session (session ID or path)",
+        help="Resume a session (session ID, 'latest', or path). Default: start fresh.",
     )
     parser.add_argument(
         "--no-stream",
@@ -567,7 +562,7 @@ class MicroclawCli:
         if self.session.messages:
             console.print(f"[dim]Resumed session {self.session.session_id[:12]} ({len(self.session.messages)} messages)[/dim]")
         else:
-            console.print(f"[dim]Fresh session. Use microclaw --boot to start fresh next time.[/dim]")
+            console.print(f"[dim]Fresh session. Use --resume latest to continue a previous session.[/dim]")
 
         try:
             from prompt_toolkit import PromptSession
@@ -1160,13 +1155,8 @@ def main(argv: list[str] | None = None) -> None:
         import microclaw.session as _session_mod
         _session_mod.DEFAULT_SESSION_DIR = os.environ["MICROCLAW_SESSION_DIR"]
 
-    # Resume latest session by default, unless --boot is specified
+    # Start fresh by default; only resume when --resume is specified
     session = None
-    if not args.boot:
-        try:
-            session = load_session_by_reference("latest")
-        except FileNotFoundError:
-            pass  # No existing session — start fresh
     if args.resume:
         try:
             session = load_session_by_reference(args.resume)

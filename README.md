@@ -23,18 +23,18 @@ pip install -e .
 # 3. Set your API credentials and run!
 # ── Using DeepSeek (OpenAI-compatible) ──
 export OPENAI_API_KEY=sk-your-key-here
-microclaw --boot
+microclaw
 
 # ── Using Anthropic (Claude) ──
 export ANTHROPIC_API_KEY=sk-ant-your-key-here
-microclaw --model claude-sonnet-4-20250514 --boot
+microclaw --model claude-sonnet-4-20250514
 
 # ── Using OpenAI (GPT) ──
 export OPENAI_API_KEY=sk-your-key-here
-microclaw --model gpt-4o --boot
+microclaw --model gpt-4o
 ```
 
-> **First time?** Use `--boot` to start. Without it, microclaw resumes your latest session automatically.
+> By default, microclaw starts a fresh session. Use `--resume latest` to continue your most recent session.
 
 ### Windows
 
@@ -47,7 +47,7 @@ pip install -e .
 
 # 3. Set your API credentials and run!
 $env:OPENAI_API_KEY = "sk-your-key-here"
-microclaw --boot
+microclaw
 ```
 
 ### One-shot prompts
@@ -68,7 +68,7 @@ microclaw --permission-mode danger-full-access -p "run the test suite"
 - **Multi-provider**: Anthropic SDK + OpenAI SDK with automatic model routing
 - **Credential-aware routing**: `deepseek-chat` auto-detects which provider to use based on your env vars
 - **Bootstrap identity system**: Personality loaded from `~/.microclaw/` markdown files (IDENTITY.md, SOUL.md, USER.md, AGENTS.md, TOOLS.md)
-- **Session persistence**: JSONL-based session save/resume — resumes latest session by default
+- **Session persistence**: JSONL-based session save/resume — fresh by default, optional explicit resume
 - **Agent teams**: spawn persistent teammates with JSONL inbox communication, shutdown/plan-approval protocols
 - **Task system**: persistent task tracking with status, priority, and dependencies
 - **Skill system**: discover skills from `./skills` and `~/.microclaw/skills`, load on demand
@@ -103,12 +103,11 @@ Run `microclaw setup` to initialize the workspace, or let it auto-init on first 
 
 | Flag | Description |
 |---|---|
-| `--boot`, `-b` | Start a fresh session (default: resume latest) |
 | `--model`, `-m` | Model to use (default: deepseek-chat) |
 | `--prompt`, `-p` | Run a single prompt and exit |
 | `--workspace`, `-w` | Workspace directory (default: ~/.microclaw) |
 | `--permission-mode` | Permission level: read-only, workspace-write, danger-full-access |
-| `--resume`, `-r` | Resume a specific session by ID or path |
+| `--resume`, `-r` | Resume a session by ID, `latest`, or path |
 | `--no-stream` | Disable streaming output |
 | `setup` | Initialize workspace at ~/.microclaw |
 | `doctor` | Check configuration and diagnose issues |
