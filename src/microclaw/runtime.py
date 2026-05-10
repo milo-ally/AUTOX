@@ -321,7 +321,10 @@ class ConversationRuntime:
                 tool_input = tool_block.input or {}
 
                 if on_event:
-                    on_event("tool_execution_start", {"name": tool_name})
+                    on_event("tool_execution_start", {
+                        "name": tool_name,
+                        "input": tool_input,
+                    })
 
                 required_perm = self.tool_registry.required_permission(tool_name)
                 outcome = self.permission_policy.authorize(
@@ -350,6 +353,7 @@ class ConversationRuntime:
                 if on_event:
                     on_event("tool_execution_end", {
                         "name": tool_name,
+                        "input": tool_input,
                         "is_error": is_error,
                         "result": result_str,
                     })

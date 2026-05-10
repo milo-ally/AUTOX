@@ -47,6 +47,8 @@ def run_bash(input_data: dict[str, Any]) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            encoding="utf-8",
+            errors="ignore",
         )
 
         stdout = result.stdout
@@ -58,7 +60,8 @@ def run_bash(input_data: dict[str, Any]) -> dict[str, Any]:
         max_inline = 100_000
         if len(stdout) > max_inline:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, prefix="microclaw_bash_"
+                mode="w", suffix=".txt", delete=False, prefix="microcode_bash_",
+                encoding="utf-8"
             ) as f:
                 f.write(stdout)
                 persisted_path = f.name

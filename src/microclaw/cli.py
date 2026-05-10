@@ -419,6 +419,36 @@ class MicroclawCli:
     def _refresh_system_prompt(self) -> None:
         self.system_prompt = self._build_system_prompt()
 
+    @staticmethod
+    def _tool_call_summary(tool_name: str, tool_input: Any) -> str:
+        if not isinstance(tool_input, dict):
+            text = str(tool_input).strip().replace("\n", " ")
+            return text[:120]
+
+        if tool_name == "bash":
+            text = str(tool_input.get("command") or tool_input.get("cmd") or "").strip()
+        elif tool_name in {"read_file", "write_file", "edit_file"}:
+            text = str(tool_input.get("path") or tool_input.get("file_path") or tool_input.get("target_file") or "").strip()
+        elif tool_name in {"grep_search", "glob_search"}:
+            pattern = tool_input.get("query") or tool_input.get("pattern") or tool_input.get("glob") or ""
+            path = tool_input.get("path") or tool_input.get("search_path") or tool_input.get("root") or ""
+            text = " ".join(str(part).strip() for part in (pattern, path) if str(part).strip())
+        elif tool_name in {"web_fetch", "web_search"}:
+            text = str(tool_input.get("url") or tool_input.get("query") or "").strip()
+        else:
+            parts = []
+            for key, value in tool_input.items():
+                if value is None:
+                    continue
+                value_text = str(value).strip().replace("\n", " ")
+                if value_text:
+                    parts.append(f"{key}={value_text}")
+                if len(parts) >= 2:
+                    break
+            text = " ".join(parts)
+
+        return text.replace("\n", " ")[:120]
+
     def _build_runtime(self) -> ConversationRuntime:
         """Build a fresh ConversationRuntime from current state."""
         config = RuntimeConfig(
@@ -438,6 +468,7 @@ class MicroclawCli:
     def run_turn(self, user_input: str) -> None:
         """Run a single conversation turn with streaming output."""
         runtime = self._build_runtime()
+        starting_message_count = len(self.session.messages)
 
         if self.no_stream:
             # Non-streaming mode
@@ -445,6 +476,11 @@ class MicroclawCli:
             console.print("[dim]Thinking...[/dim]")
             try:
                 summary = runtime.run_turn(user_input, prompter=prompter)
+            except KeyboardInterrupt:
+                self.session.messages = self.session.messages[:starting_message_count + 1]
+                self.session.save()
+                console.print("\n[yellow]Interrupted.[/yellow] [dim]Enter a new message to continue.[/dim]")
+                return
             except Exception as e:
                 console.print(f"[bold red]✗ Error:[/bold red] {e}")
                 return
@@ -469,9 +505,14 @@ class MicroclawCli:
                     printer.append(data)
                 elif event_type == "tool_execution_start":
                     printer.flush()
+                    detail = self._tool_call_summary(
+                        data.get("name", "tool"),
+                        data.get("input", {}),
+                    )
+                    detail_text = f" [bright_black]— {detail}[/bright_black]" if detail else ""
                     console.print(
-                        f"\n[yellow]●[/yellow] [bold white]{data.get('name', 'tool')}[/bold white] "
-                        f"[bright_black]running[/bright_black]"
+                        f"\n[cyan]●[/cyan] [bold white]{data.get('name', 'tool')}[/bold white] "
+                        f"[bright_black]running[/bright_black]{detail_text}"
                     )
                 elif event_type == "tool_execution_end":
                     name = data.get("name", "tool")
@@ -500,6 +541,14 @@ class MicroclawCli:
                     on_event=on_event,
                     prompter=prompter,
                 )
+            except KeyboardInterrupt:
+                printer.finish()
+                self.session = runtime.session
+                self.session.messages = self.session.messages[:starting_message_count + 1]
+                self._cumulative_usage.accumulate(runtime._cumulative_usage)
+                self.session.save()
+                console.print("\n[yellow]Interrupted.[/yellow] [dim]Enter a new message to continue.[/dim]")
+                return
             except Exception as e:
                 printer.finish()
                 console.print(f"\n[bold red]✗ Error:[/bold red] {e}")
