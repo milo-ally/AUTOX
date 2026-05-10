@@ -23,7 +23,7 @@ from microclaw.render import (
     print_help,
     print_status,
 )
-from microclaw.compact import compact_session, estimate_tokens
+from microclaw.compact import THRESHOLD, compact_session, estimate_tokens
 from microclaw.runtime import ConversationRuntime, RuntimeConfig
 from microclaw.session import Session, new_session, load_session_by_reference, list_sessions
 from microclaw.tools.executor import ToolExecutor
@@ -419,6 +419,25 @@ class MicroclawCli:
     def _refresh_system_prompt(self) -> None:
         self.system_prompt = self._build_system_prompt()
 
+    def _context_window_remaining(self) -> tuple[int, int, int]:
+        used = estimate_tokens(self.session.messages)
+        limit = THRESHOLD
+        remaining = max(limit - used, 0)
+        percent = max(0, min(100, round((remaining / limit) * 100))) if limit else 0
+        return used, remaining, percent
+
+    def _context_window_indicator(self) -> str:
+        used, remaining, percent = self._context_window_remaining()
+        if percent >= 70:
+            circle = "◯"
+        elif percent >= 35:
+            circle = "◐"
+        elif percent >= 15:
+            circle = "◕"
+        else:
+            circle = "●"
+        return f"{circle} ctx {percent}% left · ~{remaining:,}/{THRESHOLD:,} tokens"
+
     @staticmethod
     def _tool_call_summary(tool_name: str, tool_input: Any) -> str:
         if not isinstance(tool_input, dict):
@@ -638,9 +657,11 @@ class MicroclawCli:
             prompt_placeholder = HTML(
                 '<promptplaceholder>🦀 Ask microclaw anything…</promptplaceholder>'
             )
-            prompt_toolbar = HTML(
-                '<prompttoolbar>  🦀 microclaw  •  Enter send  •  /help  •  /new  •  /status  </prompttoolbar>'
-            )
+            def prompt_toolbar():
+                indicator = self._context_window_indicator()
+                return HTML(
+                    f'<prompttoolbar>  🦀 microclaw  •  {indicator}  •  Enter send  •  /help  •  /new  •  /status  </prompttoolbar>'
+                )
         except ImportError:
             prompt_session = None
             prompt_style = None
