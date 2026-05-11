@@ -188,10 +188,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 class WebApprovalPrompter:
-    def __init__(self, mode: PermissionMode, channel: WebChannel):
+    def __init__(self, mode: PermissionMode, channel: WebChannel, cancel_checker=None):
         self.mode = mode
         self.escalated = False
         self._channel = channel
+        self._cancel_checker = cancel_checker
         self._pending: dict[str, dict[str, object]] = {}
         self._lock = threading.Lock()
 
@@ -219,7 +220,11 @@ class WebApprovalPrompter:
                 },
             )
         )
-        event.wait()
+        while not event.wait(0.1):
+            if self._cancel_checker and self._cancel_checker():
+                with self._lock:
+                    self._pending.pop(request_id, None)
+                raise KeyboardInterrupt
         with self._lock:
             pending = self._pending.pop(request_id, pending)
         if not bool(pending.get("allowed")):
@@ -614,8 +619,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     web_prompter = None
 
     if isinstance(channel, WebChannel):
-        web_prompter = WebApprovalPrompter(permission_mode, channel)
+        web_prompter = WebApprovalPrompter(
+            permission_mode,
+            channel,
+            cancel_checker=engine._cancel_event.is_set,
+        )
         channel.permission_responder = web_prompter.respond
+        channel.runtime_interrupter = engine.cancel_current_turn
 
         def _web_session_messages() -> list[dict[str, object]]:
             messages: list[dict[str, object]] = []

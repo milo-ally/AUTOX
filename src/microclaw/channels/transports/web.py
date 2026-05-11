@@ -80,6 +80,7 @@ class WebChannel(Channel):
         self._new_session: Callable[[], dict[str, object]] | None = None
         self._resume_session: Callable[[str], dict[str, object]] | None = None
         self.permission_responder: Callable[[str, bool, str], dict[str, object]] | None = None
+        self.runtime_interrupter: Callable[[], dict[str, object]] | None = None
         self.app = self._build_app()
 
     # -- Channel ------------------------------------------------------------
@@ -152,6 +153,12 @@ class WebChannel(Channel):
             if self.permission_responder is None:
                 return {"ok": False, "error": "permission API is not configured"}
             return self.permission_responder(req.request_id, req.allowed, req.scope)
+
+        @app.post("/api/runtime/interrupt")
+        def runtime_interrupt() -> dict[str, object]:
+            if self.runtime_interrupter is None:
+                return {"ok": False, "error": "runtime interrupt API is not configured"}
+            return self.runtime_interrupter()
 
         @app.post("/api/chat", response_model=ChatResponse)
         def chat(req: ChatRequest) -> ChatResponse:

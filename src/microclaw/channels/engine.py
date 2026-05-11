@@ -12,6 +12,7 @@ They only produce `InboundMessage`s and `TurnSink`s.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from typing import Any
@@ -112,6 +113,9 @@ class ChannelEngine:
 
         self.system_prompt = self._build_system_prompt()
         self._cumulative_usage = Usage()
+        self._cancel_event = threading.Event()
+        self._turn_lock = threading.Lock()
+        self._is_running = False
 
     # -- prompt -------------------------------------------------------------
 
@@ -151,6 +155,12 @@ class ChannelEngine:
 
     # -- main entry ---------------------------------------------------------
 
+    def cancel_current_turn(self) -> dict[str, object]:
+        if not self._is_running:
+            return {"ok": False, "error": "no turn is currently running"}
+        self._cancel_event.set()
+        return {"ok": True}
+
     def handle_message(
         self,
         inbound: InboundMessage,
@@ -173,6 +183,9 @@ class ChannelEngine:
         The engine catches everything — channels should never crash because
         of a single bad turn.
         """
+        with self._turn_lock:
+            self._cancel_event.clear()
+            self._is_running = True
         request_id = f"req_{uuid.uuid4().hex[:12]}"
         effective_permission_mode = permission_mode or self.permission_mode
         prompter = prompter or ChannelDenyPrompter(effective_permission_mode)
@@ -214,6 +227,7 @@ class ChannelEngine:
                     inbound.text,
                     on_event=on_event,
                     prompter=prompter,
+                    cancel_checker=self._cancel_event.is_set,
                 )
             else:
                 summary = runtime.run_turn(inbound.text, prompter=prompter)
@@ -228,13 +242,15 @@ class ChannelEngine:
                 sink.on_error(KeyboardInterrupt("turn interrupted"))
             finally:
                 self._safe_turn_end(sink, request_id)
-            raise
+            return
 
         except Exception as e:
             try:
                 sink.on_error(e)
             finally:
                 self._safe_turn_end(sink, request_id)
+            # log here for the operator and keep serving.
+            print(f"[serve] turn failed: {e}", file=sys.stderr, flush=True)
             # Persist partial session state if anything got written.
             try:
                 self.session = runtime.session
@@ -243,6 +259,11 @@ class ChannelEngine:
             except Exception:
                 pass
             return
+
+        finally:
+            with self._turn_lock:
+                self._is_running = False
+                self._cancel_event.clear()
 
         # Success path — extract the final assistant text once.
         final_text_parts: list[str] = []

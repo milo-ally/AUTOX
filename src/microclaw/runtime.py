@@ -190,6 +190,7 @@ class ConversationRuntime:
         user_input: str,
         on_event: Callable[[str, Any], None] | None = None,
         prompter: Any = None,
+        cancel_checker: Callable[[], bool] | None = None,
     ) -> TurnSummary:
         """Run a conversation turn with streaming output.
 
@@ -208,6 +209,8 @@ class ConversationRuntime:
         iterations = 0
 
         while True:
+            if cancel_checker and cancel_checker():
+                raise KeyboardInterrupt
             iterations += 1
             if iterations > self.config.max_iterations:
                 raise TurnError(
@@ -244,8 +247,12 @@ class ConversationRuntime:
                     tools=tools,
                     system=system_text,
                 ):
+                    if cancel_checker and cancel_checker():
+                        raise KeyboardInterrupt
                     if on_event:
                         on_event(event_type, data)
+                    if cancel_checker and cancel_checker():
+                        raise KeyboardInterrupt
 
                     if event_type == "text":
                         text_parts.append(data)
@@ -316,6 +323,8 @@ class ConversationRuntime:
             # Execute each tool
             manual_compact = False
             for tool_block in pending_tool_uses:
+                if cancel_checker and cancel_checker():
+                    raise KeyboardInterrupt
                 tool_name = tool_block.name or ""
                 tool_use_id = tool_block.id or ""
                 tool_input = tool_block.input or {}
@@ -335,6 +344,8 @@ class ConversationRuntime:
                 )
 
                 if outcome.allowed:
+                    if cancel_checker and cancel_checker():
+                        raise KeyboardInterrupt
                     try:
                         result_str = self.tool_executor.execute(tool_name, tool_input)
                         is_error = False

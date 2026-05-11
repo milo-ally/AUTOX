@@ -8,6 +8,10 @@ tags: [microclaw, development, architecture, channels, web, wechat, tools, provi
 
 You are an expert in the microclaw codebase. This skill provides architectural knowledge and practical guidance for extending microclaw itself — helping the agent understand its own structure and capabilities.
 
+## Web Frontend
+
+The standalone React/TypeScript web frontend lives at [milo-ally/microclaw-frontend](https://github.com/milo-ally/microclaw-frontend). It connects to `microclaw serve` (default port 8787) via SSE and REST APIs.
+
 ## Project Structure
 
 ```
@@ -263,7 +267,7 @@ Tools / Skills            (core — unchanged)
 ### Key Abstractions (in `channels/base.py`)
 
 - **InboundMessage** — dataclass with `text`, `user_id`, `account_id`, `session_key`, `reply_to`, `meta`
-- **OutboundEvent** — normalized event (`OutboundKind` enum): `TURN_START`, `TEXT_DELTA`, `THINKING_DELTA`, `TOOL_START`, `TOOL_END`, `FINAL`, `ERROR`, `TURN_END`
+- **OutboundEvent** — normalized event (`OutboundKind` enum): `TURN_START`, `TEXT_DELTA`, `THINKING_DELTA`, `TOOL_START`, `TOOL_END`, `PERMISSION_REQUEST`, `FINAL`, `ERROR`, `TURN_END`
 - **TurnSink** (ABC) — receives streaming events for one agent turn; two flavours:
   - `StreamingTurnSink` — emits each delta as it arrives (web SSE, terminal)
   - `BufferedTurnSink` — accumulates and delivers once at `on_final` (WeChat, SMS)
@@ -276,18 +280,43 @@ Headless runtime host. Builds the same stack as `MicroclawCli` (session, provide
 
 - `ChannelDenyPrompter` — default permission prompter for channels: denies tool escalation (channels run unattended)
 - One engine instance = one logical conversation (Session), reused across inbound messages
+- `cancel_current_turn()` — sets a cancel flag checked by runtime at each stream chunk / tool boundary; raises `KeyboardInterrupt` for clean rollback
+- Supports external `prompter` parameter — web channel passes `WebApprovalPrompter` to block on frontend approval instead of auto-denying
+
+### WebApprovalPrompter (`channels/serve.py`)
+
+When `microclaw serve` runs the web channel, tool calls requiring elevated permissions broadcast a `PERMISSION_REQUEST` SSE event and block until the frontend responds via `POST /api/permissions/respond`.
+
+- **Approve once** — allow this single tool call
+- **Approve for session** — escalate permission mode for the rest of the session
+- **Deny** — reject the tool call
+- **Stop (interrupt)** — the cancel checker wakes the blocked prompter and raises `KeyboardInterrupt`
 
 ### Transports
 
 | Transport | File | Streaming | Description |
 |---|---|---|---|
-| **web** | `transports/web.py` | Yes | FastAPI + SSE browser UI on configurable host:port (default `127.0.0.1:8787`). Endpoints: `GET /` (UI), `GET /api/health`, `POST /api/chat`, `GET /api/events` (SSE) |
+| **web** | `transports/web.py` | Yes | FastAPI + SSE browser UI on configurable host:port (default `127.0.0.1:8787`). See Web API section below |
 | **queue** | `transports/queue.py` | Yes | Local JSONL `inbox.jsonl`/`outbox.jsonl` under `~/.microclaw/channels/queue/<instance>/`. Cursor-based polling. Good for tests and integrations |
 | **wechat** | `transports/wechat.py` | No | WeChat iLink bot: long-poll `getupdates`, persist `get_updates_buf`, send replies via `sendmessage`. QR login flow, account store, throttled buffered replies |
 
 ### WeChat Account Store
 
 Accounts saved under `~/.microclaw/channels/wechat/accounts/<id>.json` with an index at `accounts.json`. Functions: `save_wechat_account()`, `load_wechat_account()`, `list_wechat_accounts()`, `delete_wechat_account()`, `login_wechat_with_qr()`.
+
+### Web Channel API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Minimal browser UI |
+| `GET` | `/api/health` | Readiness probe |
+| `POST` | `/api/chat` | Submit a user message (returns `{id, accepted}`) |
+| `GET` | `/api/events` | SSE stream of `OutboundEvent` objects |
+| `GET` | `/api/sessions` | List sessions + current session info |
+| `POST` | `/api/sessions` | Create a new session |
+| `POST` | `/api/sessions/resume` | Resume a session by ID |
+| `POST` | `/api/permissions/respond` | Respond to a pending permission request (`{request_id, allowed, scope}`) |
+| `POST` | `/api/runtime/interrupt` | Cancel the currently running turn (equivalent to Ctrl+C in TUI) |
 
 ### How to Add a New Channel
 
