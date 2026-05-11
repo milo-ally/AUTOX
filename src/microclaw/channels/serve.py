@@ -555,6 +555,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     channel = _build_channel(args.channel, args)
 
+    if isinstance(channel, WebChannel):
+        def _web_session_messages() -> list[dict[str, object]]:
+            messages: list[dict[str, object]] = []
+            for msg in engine.session.messages:
+                text = msg.text_content()
+                if not text:
+                    continue
+                messages.append({
+                    "id": f"{msg.role}_{len(messages)}",
+                    "role": msg.role,
+                    "content": text,
+                    "timestamp": engine.session.updated_at_ms,
+                })
+            return messages
+
+        def _session_payload() -> dict[str, object]:
+            return {
+                "ok": True,
+                "current_session_id": engine.session.session_id,
+                "current_messages": _web_session_messages(),
+                "sessions": list_sessions(),
+            }
+
+        def _new_web_session() -> dict[str, object]:
+            engine.session = new_session()
+            engine.session.model = engine.model
+            engine.session.save()
+            return _session_payload()
+
+        def _resume_web_session(session_id: str) -> dict[str, object]:
+            try:
+                session = load_session_by_reference(session_id)
+            except FileNotFoundError as e:
+                return {"ok": False, "error": str(e), "sessions": list_sessions()}
+            engine.session = session
+            engine.model = session.model or engine.model
+            engine.provider = create_provider(engine.model)
+            engine.team_manager.model = engine.model
+            return _session_payload()
+
+        channel.set_session_handlers(
+            list_sessions=_session_payload,
+            new_session=_new_web_session,
+            resume_session=_resume_web_session,
+        )
+
     use_streaming = (not args.no_stream) and channel.supports_streaming
 
     # Graceful shutdown via SIGINT/SIGTERM.

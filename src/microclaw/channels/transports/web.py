@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -47,6 +47,10 @@ class ChatResponse(BaseModel):
     accepted: bool = True
 
 
+class SessionSwitchRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+
+
 @dataclass
 class WebChannelConfig:
     host: str = "127.0.0.1"
@@ -66,6 +70,9 @@ class WebChannel(Channel):
         self._stopped = threading.Event()
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
+        self._list_sessions: Callable[[], dict[str, object]] | None = None
+        self._new_session: Callable[[], dict[str, object]] | None = None
+        self._resume_session: Callable[[str], dict[str, object]] | None = None
         self.app = self._build_app()
 
     # -- Channel ------------------------------------------------------------
@@ -80,6 +87,17 @@ class WebChannel(Channel):
 
     def open_sink(self, message: InboundMessage) -> TurnSink:
         return StreamingTurnSink(self._broadcast)
+
+    def set_session_handlers(
+        self,
+        *,
+        list_sessions: Callable[[], dict[str, object]],
+        new_session: Callable[[], dict[str, object]],
+        resume_session: Callable[[str], dict[str, object]],
+    ) -> None:
+        self._list_sessions = list_sessions
+        self._new_session = new_session
+        self._resume_session = resume_session
 
     def stop(self) -> None:
         self._stopped.set()
@@ -103,6 +121,24 @@ class WebChannel(Channel):
         @app.get("/api/health")
         def health() -> dict[str, object]:
             return {"ok": True, "channel": self.name, "ts": time.time()}
+
+        @app.get("/api/sessions")
+        def sessions() -> dict[str, object]:
+            if self._list_sessions is None:
+                return {"ok": False, "error": "session handlers are not ready", "sessions": []}
+            return self._list_sessions()
+
+        @app.post("/api/sessions")
+        def sessions_new() -> dict[str, object]:
+            if self._new_session is None:
+                return {"ok": False, "error": "session handlers are not ready"}
+            return self._new_session()
+
+        @app.post("/api/sessions/resume")
+        def sessions_resume(req: SessionSwitchRequest) -> dict[str, object]:
+            if self._resume_session is None:
+                return {"ok": False, "error": "session handlers are not ready"}
+            return self._resume_session(req.session_id)
 
         @app.post("/api/chat", response_model=ChatResponse)
         def chat(req: ChatRequest) -> ChatResponse:
