@@ -105,9 +105,10 @@ class ChannelEngine:
             skill_loader=self.skill_loader,
         )
 
-        # Channels run without a team manager by default; team coordination
-        # is a terminal-REPL feature today. Engines stay minimal.
-        self.team_manager = None
+        from microclaw.tools.team import TeamManager
+
+        self.team_manager = TeamManager(model=self.model)
+        self.tool_executor.set_team_manager(self.team_manager)
 
         self.system_prompt = self._build_system_prompt()
         self._cumulative_usage = Usage()
@@ -156,6 +157,7 @@ class ChannelEngine:
         sink: TurnSink,
         *,
         use_streaming: bool = True,
+        permission_mode: PermissionMode | None = None,
     ) -> None:
         """Run one agent turn for the given inbound message.
 
@@ -171,8 +173,12 @@ class ChannelEngine:
         of a single bad turn.
         """
         request_id = f"req_{uuid.uuid4().hex[:12]}"
-        prompter = ChannelDenyPrompter(self.permission_mode)
+        effective_permission_mode = permission_mode or self.permission_mode
+        prompter = ChannelDenyPrompter(effective_permission_mode)
+        original_permission_mode = self.permission_mode
+        self.permission_mode = effective_permission_mode
         runtime = self._build_runtime()
+        self.permission_mode = original_permission_mode
         starting_message_count = len(self.session.messages)
 
         try:

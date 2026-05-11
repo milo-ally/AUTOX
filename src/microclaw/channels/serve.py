@@ -14,19 +14,26 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
 from typing import Sequence
 
-from microclaw import DEFAULT_MODEL
+from microclaw import DEFAULT_MODEL, __version__
 from microclaw.channels.base import Channel
 from microclaw.channels.engine import ChannelEngine
 from microclaw.channels.transports.queue import QueueChannel
 from microclaw.channels.transports.web import WebChannel
 from microclaw.channels.transports.wechat import WechatChannel
 from microclaw.permissions import PermissionMode
-from microclaw.session import load_session_by_reference
+from microclaw.providers import create_provider, resolve_model_alias
+from microclaw.session import (
+    list_sessions,
+    load_session_by_reference,
+    new_session,
+)
+from microclaw.tools.tasks import TaskSystem
 
 
 # -- channel factory --------------------------------------------------------
@@ -178,6 +185,335 @@ def _build_parser() -> argparse.ArgumentParser:
 # -- main -------------------------------------------------------------------
 
 
+def _handle_served_slash_command(
+    text: str,
+    *,
+    engine: ChannelEngine,
+    sink,
+    inbound,
+) -> bool:
+    trimmed = text.strip()
+    if not trimmed.startswith("/"):
+        return False
+
+    request_id = f"slash_{inbound.id}"
+    parts = trimmed.split(maxsplit=1)
+    command = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else ""
+
+    if command == "/help":
+        response = (
+            "# microclaw commands\n\n"
+            "## General\n"
+            "- `/help` Show this help\n"
+            "- `/status` Show session status\n"
+            "- `/model [name]` Show or switch model\n"
+            "- `/permissions [mode]` Show or set permissions\n"
+            "- `/version` Show microclaw version\n\n"
+            "## Session\n"
+            "- `/compact [focus]` Compact conversation history\n"
+            "- `/clear` Clear conversation history\n"
+            "- `/cost` Show token usage and estimated cost\n"
+            "- `/history` Show recent prompts\n"
+            "- `/session` List managed sessions\n"
+            "- `/resume <id|latest|path>` Resume a session\n"
+            "- `/export [path]` Export session to JSON\n\n"
+            "## Task/team/skills\n"
+            "- `/tasks ...` Manage tasks\n"
+            "- `/skills ...` Manage skills\n"
+            "- `/team ...` Manage agent team"
+        )
+    elif command == "/status":
+        response = (
+            f"# Status\n\n"
+            f"- **model**: `{engine.model}`\n"
+            f"- **session**: `{engine.session.session_id}`\n"
+            f"- **messages**: `{len(engine.session.messages)}`\n"
+            f"- **permission mode**: `{engine.permission_mode}`"
+        )
+    elif command == "/model":
+        if args.strip():
+            new_model = resolve_model_alias(args.strip())
+            engine.model = new_model
+            engine.provider = create_provider(new_model)
+            engine.session.model = new_model
+            engine.team_manager.model = new_model
+            response = f"Model set to `{new_model}`."
+        else:
+            response = f"Current model: `{engine.model}`"
+    elif command == "/permissions":
+        if args.strip():
+            try:
+                engine.permission_mode = PermissionMode.from_str(args.strip())
+                response = f"Permissions set to `{engine.permission_mode}`."
+            except ValueError as e:
+                response = str(e)
+        else:
+            response = f"Current permissions: `{engine.permission_mode}`"
+    elif command == "/clear":
+        engine.session = new_session()
+        engine.session.model = engine.model
+        engine.session.save()
+        response = "Session conversation history cleared."
+    elif command == "/cost":
+        usage = engine._cumulative_usage
+        team_usage = engine.team_manager.aggregate_usage()
+        response = (
+            "# Cost\n\n"
+            f"- **input tokens**: `{usage.input_tokens + team_usage.input_tokens:,}`\n"
+            f"- **output tokens**: `{usage.output_tokens + team_usage.output_tokens:,}`\n"
+            f"- **total tokens**: `{usage.total_tokens() + team_usage.total_tokens():,}`\n"
+            f"- **model**: `{engine.model}`"
+        )
+    elif command == "/history":
+        entries = getattr(engine.session, "prompt_history", [])[-20:]
+        response = "\n".join(f"- {entry.text}" for entry in entries) or "No prompt history."
+    elif command == "/session":
+        sessions = list_sessions()
+        response = (
+            "No managed sessions."
+            if not sessions
+            else "\n".join(
+                f"- `{s['id']}` msgs={s['message_count']} model={s.get('model', '?')}"
+                for s in sessions
+            )
+        )
+    elif command == "/resume":
+        if not args.strip():
+            response = "Usage: `/resume <session-id|latest|path>`"
+        else:
+            try:
+                session = load_session_by_reference(args.strip())
+                engine.session = session
+                engine.model = session.model or engine.model
+                engine.provider = create_provider(engine.model)
+                engine.team_manager.model = engine.model
+                response = f"Resumed session `{session.session_id}`."
+            except FileNotFoundError as e:
+                response = str(e)
+    elif command == "/export":
+        path = args.strip() or f"microclaw-export-{engine.session.session_id}.json"
+        response = _export_served_session(engine, path)
+    elif command == "/tasks":
+        response = _handle_tasks_command(args.strip())
+    elif command == "/skills":
+        response = _handle_skills_command(engine, args.strip())
+    elif command == "/team":
+        response = _handle_team_command(engine, args.strip())
+    elif command == "/version":
+        response = f"microclaw `{__version__}`"
+    elif command in {"/exit", "/quit"}:
+        response = "The web channel stays running. Stop `microclaw serve` from the terminal to exit."
+    else:
+        response = f"Unknown command: `{command}`. Use `/help` to see available commands."
+
+    sink.on_turn_start(request_id, inbound)
+    sink.on_final(response)
+    sink.on_turn_end(request_id, None)
+    return True
+
+
+def _handle_tasks_command(args: str) -> str:
+    parts = args.split()
+    subcommand = parts[0].lower() if parts else "list"
+    ts = TaskSystem()
+    if subcommand in ("list", "ls", ""):
+        result = ts.list_tasks()
+        summary = result.get("summary", [])
+        counts = result.get("counts", {})
+        if not summary:
+            return "No tasks."
+        return (
+            f"Tasks: {counts.get('pending', 0)} pending, "
+            f"{counts.get('in_progress', 0)} in_progress, "
+            f"{counts.get('completed', 0)} completed\n\n"
+            + "\n".join(f"- {line}" for line in summary)
+        )
+    if subcommand in ("add", "create", "new"):
+        if len(parts) < 2:
+            return "Usage: `/tasks add <subject> [--status pending|in_progress|completed] [--priority high|medium|low]`"
+        subject: list[str] = []
+        status = "pending"
+        priority = "medium"
+        skip_next = False
+        for i, part in enumerate(parts[1:], start=1):
+            if skip_next:
+                skip_next = False
+                continue
+            if part == "--status" and i + 1 < len(parts):
+                status = parts[i + 1]
+                skip_next = True
+            elif part == "--priority" and i + 1 < len(parts):
+                priority = parts[i + 1]
+                skip_next = True
+            else:
+                subject.append(part)
+        result = ts.create_task({"subject": " ".join(subject), "status": status, "priority": priority})
+        task = result.get("task", {})
+        return f"Created task #{task.get('id')}: {task.get('subject')}"
+    if subcommand in ("update", "done", "start", "stop"):
+        if len(parts) < 2:
+            return "Usage: `/tasks update <id> [--status ...] [--priority ...]`"
+        try:
+            task_id = int(parts[1])
+        except ValueError:
+            return "Task ID must be an integer."
+        update_data: dict[str, object] = {"task_id": task_id}
+        if subcommand == "done":
+            update_data["status"] = "completed"
+        elif subcommand == "start":
+            update_data["status"] = "in_progress"
+        elif subcommand == "stop":
+            update_data["status"] = "pending"
+        else:
+            skip_next = False
+            for i, part in enumerate(parts[2:], start=2):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if part == "--status" and i + 1 < len(parts):
+                    update_data["status"] = parts[i + 1]
+                    skip_next = True
+                elif part == "--priority" and i + 1 < len(parts):
+                    update_data["priority"] = parts[i + 1]
+                    skip_next = True
+        result = ts.update_task(update_data)
+        task = result.get("task", {})
+        return f"Updated task #{task.get('id')}: {task.get('subject')}"
+    if subcommand in ("get", "show", "info"):
+        if len(parts) < 2:
+            return "Usage: `/tasks get <id>`"
+        try:
+            task = ts.get_task(int(parts[1])).get("task", {})
+        except ValueError:
+            return "Task ID must be an integer."
+        return json.dumps(task, ensure_ascii=False, indent=2)
+    if subcommand in ("delete", "rm", "del", "remove"):
+        if len(parts) < 2:
+            return "Usage: `/tasks delete <id>`"
+        try:
+            ts.delete_task(int(parts[1]))
+        except ValueError:
+            return "Task ID must be an integer."
+        return f"Deleted task #{parts[1]}"
+    if subcommand == "clear":
+        result = ts.clear_tasks()
+        return f"Cleared {result.get('tasks_cleared', 0)} tasks."
+    return "Usage: `/tasks [list|add|update|get|delete|done|start|stop|clear]`"
+
+
+def _handle_skills_command(engine: ChannelEngine, args: str) -> str:
+    parts = args.split()
+    subcommand = parts[0].lower() if parts else "list"
+    if subcommand in ("list", "ls"):
+        names = engine.skill_loader.available_names()
+        if not names:
+            return "No skills found."
+        rows = []
+        for name in names:
+            skill = engine.skill_loader.get(name)
+            if skill is None:
+                continue
+            active = " active" if name in engine.active_skills else ""
+            rows.append(f"- `{skill.name}`{active}: {skill.description or 'No description'}")
+        return "\n".join(rows)
+    if subcommand in ("show", "active"):
+        return ", ".join(engine.active_skills) if engine.active_skills else "No active skills."
+    if subcommand == "reload":
+        engine.skill_loader.reload()
+        engine.active_skills = [name for name in engine.active_skills if engine.skill_loader.get(name)]
+        engine.system_prompt = engine._build_system_prompt()
+        return f"Reloaded {len(engine.skill_loader.available_names())} skills."
+    if subcommand in ("use", "enable", "add"):
+        if len(parts) < 2:
+            return "Usage: `/skills use <name>`"
+        name = parts[1]
+        if not engine.skill_loader.get(name):
+            return f"Unknown skill: `{name}`"
+        if name not in engine.active_skills:
+            engine.active_skills.append(name)
+            engine.system_prompt = engine._build_system_prompt()
+        return f"Skill activated: `{name}`"
+    if subcommand in ("drop", "disable", "remove", "rm"):
+        if len(parts) < 2:
+            return "Usage: `/skills drop <name>`"
+        name = parts[1]
+        if name in engine.active_skills:
+            engine.active_skills.remove(name)
+            engine.system_prompt = engine._build_system_prompt()
+            return f"Skill deactivated: `{name}`"
+        return f"Skill not active: `{name}`"
+    return "Usage: `/skills [list|show|reload|use <name>|drop <name>]`"
+
+
+def _handle_team_command(engine: ChannelEngine, args: str) -> str:
+    parts = args.split()
+    subcommand = parts[0].lower() if parts else "list"
+    tm = engine.team_manager
+    if subcommand in ("list", "ls", ""):
+        return tm.list_all()
+    if subcommand == "spawn":
+        if len(parts) < 3:
+            return "Usage: `/team spawn <name> <role> --prompt <prompt>`"
+        prompt = " ".join(parts[3:])
+        if "--prompt" in parts:
+            prompt = " ".join(parts[parts.index("--prompt") + 1:])
+        if not prompt:
+            return "Usage: `/team spawn <name> <role> --prompt <prompt>`"
+        return tm.spawn(parts[1], parts[2], prompt)
+    if subcommand == "shutdown":
+        return "Usage: `/team shutdown <name>`" if len(parts) < 2 else tm.request_shutdown(parts[1])
+    if subcommand == "inbox":
+        messages = tm.read_lead_inbox()
+        if not messages:
+            return "Inbox is empty."
+        return "\n".join(f"- [{m.get('type', 'message')}] from {m.get('from', '?')}: {m.get('content', '')}" for m in messages)
+    if subcommand in ("approve", "reject"):
+        if len(parts) < 2:
+            return f"Usage: `/team {subcommand} <request_id>`"
+        return tm.review_plan(parts[1], subcommand == "approve", " ".join(parts[2:]))
+    if subcommand == "plans":
+        pending = tm.get_pending_plans()
+        if not pending:
+            return "No pending plan requests."
+        return "\n".join(f"- `{p.get('request_id', '?')}` from {p.get('from', '?')}: {p.get('plan', '')}" for p in pending)
+    if subcommand == "cost":
+        usage = tm.aggregate_usage()
+        return f"Team input tokens: `{usage.input_tokens:,}`\n\nTeam output tokens: `{usage.output_tokens:,}`"
+    return "Usage: `/team [list|spawn|shutdown|inbox|approve|reject|plans|cost]`"
+
+
+def _export_served_session(engine: ChannelEngine, path: str) -> str:
+    messages = []
+    for msg in engine.session.messages:
+        messages.append(
+            {
+                "role": msg.role,
+                "content": [
+                    {
+                        key: value
+                        for key, value in {
+                            "type": block.type,
+                            "text": block.text,
+                            "name": block.name,
+                            "input": block.input,
+                            "content": block.content,
+                        }.items()
+                        if value
+                    }
+                    for block in msg.content
+                ],
+            }
+        )
+    export_data = {
+        "session_id": engine.session.session_id,
+        "model": engine.model,
+        "messages": messages,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(export_data, f, indent=2, ensure_ascii=False)
+    return f"Session exported to `{path}`."
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
 
@@ -241,7 +577,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         for inbound in channel.serve():
             sink = channel.open_sink(inbound)
             try:
-                engine.handle_message(inbound, sink, use_streaming=use_streaming)
+                if _handle_served_slash_command(
+                    inbound.text,
+                    engine=engine,
+                    sink=sink,
+                    inbound=inbound,
+                ):
+                    continue
+                requested_permission_mode = None
+                requested_permission_mode_raw = inbound.meta.get("permission_mode")
+                if isinstance(requested_permission_mode_raw, str):
+                    try:
+                        requested_permission_mode = PermissionMode.from_str(
+                            requested_permission_mode_raw
+                        )
+                    except ValueError:
+                        requested_permission_mode = None
+                engine.handle_message(
+                    inbound,
+                    sink,
+                    use_streaming=use_streaming,
+                    permission_mode=requested_permission_mode,
+                )
             except KeyboardInterrupt:
                 break
             except Exception as e:

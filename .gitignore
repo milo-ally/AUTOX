@@ -34,3 +34,6 @@ microclaw.db
 
 # Workspace (generated at ~/.microclaw on first run)
 .microclaw/
+
+# Standalone frontend project
+/microclaw-web/
