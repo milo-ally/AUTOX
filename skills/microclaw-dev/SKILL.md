@@ -1,7 +1,7 @@
 ---
 name: microclaw-dev
-description: Guide for developing and extending microclaw — a personal AI assistant CLI (Python rewrite of OpenClaw). Covers architecture, tools, providers, skills, and bootstrap system.
-tags: [microclaw, development, architecture, tools, providers, bootstrap]
+description: Guide for developing and extending microclaw — a personal AI assistant CLI with interaction gateway (web, queue, WeChat). Covers architecture, channels layer, tools, providers, skills, and bootstrap system.
+tags: [microclaw, development, architecture, channels, web, wechat, tools, providers, bootstrap]
 ---
 
 # MicroClaw Development Skill
@@ -27,16 +27,28 @@ src/microclaw/
 │   ├── types.py          # Shared types: Message, ContentBlock, Usage, etc.
 │   ├── anthropic.py      # Anthropic provider (Anthropic SDK)
 │   └── openai.py         # OpenAI-compatible provider (OpenAI SDK)
-└── tools/
-    ├── __init__.py       # Tool exports
-    ├── registry.py       # ToolSpec, ToolRegistry, mvp_tool_specs()
-    ├── executor.py       # ToolExecutor — dispatch & error handling
-    ├── bash.py           # Shell command execution
-    ├── file.py           # read_file / write_file / edit_file
-    ├── web.py            # web_fetch / web_search
-    ├── background.py     # BackgroundManager
-    ├── tasks.py          # Persistent TaskSystem
-    └── team.py           # Agent teams: TeamManager, MessageBus, ProtocolTracker
+├── tools/
+│   ├── __init__.py       # Tool exports
+│   ├── registry.py       # ToolSpec, ToolRegistry, mvp_tool_specs()
+│   ├── executor.py       # ToolExecutor — dispatch & error handling
+│   ├── bash.py           # Shell command execution
+│   ├── file.py           # read_file / write_file / edit_file
+│   ├── web.py            # web_fetch / web_search
+│   ├── background.py     # BackgroundManager
+│   ├── tasks.py          # Persistent TaskSystem
+│   └── team.py           # Agent teams: TeamManager, MessageBus, ProtocolTracker
+└── channels/             # Interaction layer (gateway above the core)
+    ├── __init__.py       # Package exports: Channel, InboundMessage, OutboundEvent, TurnSink
+    ├── base.py           # Core abstractions: Channel, InboundMessage, OutboundEvent, TurnSink
+    ├── engine.py         # ChannelEngine — headless runtime host for channels
+    ├── serve.py          # `microclaw serve` entry point + argparse
+    ├── sinks.py          # StreamingTurnSink, BufferedTurnSink, ThrottledBufferedSink
+    ├── wechat_cli.py     # `microclaw wechat` CLI (login/list/logout)
+    └── transports/
+        ├── __init__.py   # Package docstring
+        ├── queue.py      # QueueChannel — local JSONL inbox/outbox
+        ├── web.py        # WebChannel — FastAPI + SSE browser UI
+        └── wechat.py     # WechatChannel — iLink long-poll + QR login + account store
 ```
 
 ## Bootstrap System
@@ -229,6 +241,62 @@ Three-layer compaction (in `compact.py`):
 - **Layer 2**: `auto_compact` — trigger when token estimate > THRESHOLD
 - **Layer 3**: `manual_compact` — triggered by `compact` tool or `/compact` command
 
+## Channels / Interaction Layer
+
+The `channels/` package adds a thin gateway above the core runtime so non-TTY surfaces can drive `ConversationRuntime` without modifying the core.
+
+### Architecture
+
+```
+Channel / Transport       (channels package)
+    |
+    v
+ChannelEngine             (channels/engine.py — bridges runtime <-> TurnSink)
+    |
+    v
+ConversationRuntime       (core — unchanged)
+    |
+    v
+Tools / Skills            (core — unchanged)
+```
+
+### Key Abstractions (in `channels/base.py`)
+
+- **InboundMessage** — dataclass with `text`, `user_id`, `account_id`, `session_key`, `reply_to`, `meta`
+- **OutboundEvent** — normalized event (`OutboundKind` enum): `TURN_START`, `TEXT_DELTA`, `THINKING_DELTA`, `TOOL_START`, `TOOL_END`, `FINAL`, `ERROR`, `TURN_END`
+- **TurnSink** (ABC) — receives streaming events for one agent turn; two flavours:
+  - `StreamingTurnSink` — emits each delta as it arrives (web SSE, terminal)
+  - `BufferedTurnSink` — accumulates and delivers once at `on_final` (WeChat, SMS)
+  - `ThrottledBufferedSink` — buffered but emits partial flushes on a time budget
+- **Channel** (ABC) — `serve()` yields `InboundMessage`s; `open_sink()` returns a `TurnSink`
+
+### ChannelEngine (`channels/engine.py`)
+
+Headless runtime host. Builds the same stack as `MicroclawCli` (session, provider, skills, tools, executor) but without terminal UI. Forwards runtime streaming events to the `TurnSink`.
+
+- `ChannelDenyPrompter` — default permission prompter for channels: denies tool escalation (channels run unattended)
+- One engine instance = one logical conversation (Session), reused across inbound messages
+
+### Transports
+
+| Transport | File | Streaming | Description |
+|---|---|---|---|
+| **web** | `transports/web.py` | Yes | FastAPI + SSE browser UI on configurable host:port (default `127.0.0.1:8787`). Endpoints: `GET /` (UI), `GET /api/health`, `POST /api/chat`, `GET /api/events` (SSE) |
+| **queue** | `transports/queue.py` | Yes | Local JSONL `inbox.jsonl`/`outbox.jsonl` under `~/.microclaw/channels/queue/<instance>/`. Cursor-based polling. Good for tests and integrations |
+| **wechat** | `transports/wechat.py` | No | WeChat iLink bot: long-poll `getupdates`, persist `get_updates_buf`, send replies via `sendmessage`. QR login flow, account store, throttled buffered replies |
+
+### WeChat Account Store
+
+Accounts saved under `~/.microclaw/channels/wechat/accounts/<id>.json` with an index at `accounts.json`. Functions: `save_wechat_account()`, `load_wechat_account()`, `list_wechat_accounts()`, `delete_wechat_account()`, `login_wechat_with_qr()`.
+
+### How to Add a New Channel
+
+1. Create `channels/transports/my_channel.py`
+2. Subclass `Channel`: implement `serve()` (yield `InboundMessage`s) and `open_sink()` (return a `TurnSink`)
+3. Set `name` and `supports_streaming` class attributes
+4. Register in `channels/serve.py:_build_channel()` and add argparse flags
+5. For non-streaming channels, return a `BufferedTurnSink` or `ThrottledBufferedSink` from `open_sink()`
+
 ## CLI Subcommands
 
 | Command | Description |
@@ -237,6 +305,15 @@ Three-layer compaction (in `compact.py`):
 | `microclaw setup` | Initialize workspace at ~/.microclaw |
 | `microclaw doctor` | Check configuration and diagnose issues |
 | `microclaw -p "prompt"` | Non-interactive single prompt mode |
+| `microclaw serve` | Start the interaction gateway (default: web on 127.0.0.1:8787) |
+| `microclaw serve --channel web` | FastAPI + SSE browser UI |
+| `microclaw serve --channel queue` | Local JSONL inbox/outbox |
+| `microclaw serve --channel wechat` | WeChat iLink gateway |
+| `microclaw wechat login` | Scan QR to login WeChat |
+| `microclaw wechat list` | List saved WeChat accounts |
+| `microclaw wechat logout <id>` | Delete a saved WeChat account |
+
+`microclaw serve` and `microclaw wechat` are dispatched in `cli.py:main()` before argparse — the interaction layer is intentionally isolated from the core REPL.
 
 ## Environment Variables
 
@@ -256,3 +333,5 @@ Three-layer compaction (in `compact.py`):
 | `MICROCLAW_TASK_DIR` | Override task storage directory |
 | `MICROCLAW_TEAM_DIR` | Override team storage directory |
 | `MICROCLAW_SESSION_DIR` | Override session storage directory |
+| `MICROCLAW_WECHAT_BASE_URL` | Override WeChat iLink runtime base URL |
+| `MICROCLAW_WECHAT_TOKEN` | Override WeChat bot token (normally created by `microclaw wechat login`) |

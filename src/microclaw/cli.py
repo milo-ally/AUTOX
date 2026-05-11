@@ -200,7 +200,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         prog="microclaw",
-        description="🦀 microclaw — personal AI assistant CLI (Python rewrite of OpenClaw)",
+        description="\U0001f980 microclaw — personal AI assistant CLI (Python rewrite of OpenClaw)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Commands:\n"
+            "  microclaw                         Start the interactive terminal REPL\n"
+            "  microclaw wechat login             Login to WeChat by scanning a QR code\n"
+            "  microclaw serve                   Start the web interaction gateway (default: 127.0.0.1:8787)\n"
+            "  microclaw serve --help            Show channel/gateway options\n"
+            "\n"
+            "Examples:\n"
+            "  microclaw --model deepseek-chat\n"
+            "  microclaw -p \"explain this codebase\" --output-format json\n"
+            "  microclaw --resume latest\n"
+            "  microclaw serve\n"
+            "  microclaw serve --channel queue\n"
+            "  microclaw wechat login\n"
+            "  microclaw serve --channel wechat\n"
+            "\n"
+            "Inside the REPL, use /help for slash commands.\n"
+        ),
     )
     parser.add_argument("--version", action="version", version=f"microclaw {__version__}")
 
@@ -1190,7 +1209,20 @@ class MicroclawCli:
 
 def main(argv: list[str] | None = None) -> None:
     """Main entry point."""
-    args = parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+
+    # `microclaw serve ...` — dispatch to the channels gateway entry without
+    # touching the REPL/argparse below. The interaction layer is intentionally
+    # isolated from the core CLI.
+    if raw_argv and raw_argv[0] == "serve":
+        from microclaw.channels.serve import main as serve_main
+        raise SystemExit(serve_main(raw_argv[1:]))
+
+    if raw_argv and raw_argv[0] == "wechat":
+        from microclaw.channels.wechat_cli import main as wechat_main
+        raise SystemExit(wechat_main(raw_argv[1:]))
+
+    args = parse_args(raw_argv)
 
     # Handle subcommands
     if args.command == "setup":
