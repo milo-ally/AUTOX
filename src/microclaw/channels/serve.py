@@ -18,15 +18,17 @@ import json
 import os
 import signal
 import sys
+import threading
+import uuid
 from typing import Sequence
 
 from microclaw import DEFAULT_MODEL, __version__
-from microclaw.channels.base import Channel
+from microclaw.channels.base import Channel, OutboundEvent, OutboundKind
 from microclaw.channels.engine import ChannelEngine
 from microclaw.channels.transports.queue import QueueChannel
 from microclaw.channels.transports.web import WebChannel
 from microclaw.channels.transports.wechat import WechatChannel
-from microclaw.permissions import PermissionMode
+from microclaw.permissions import PermissionMode, PermissionOutcome
 from microclaw.providers import create_provider, resolve_model_alias
 from microclaw.session import (
     list_sessions,
@@ -183,6 +185,61 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # -- main -------------------------------------------------------------------
+
+
+class WebApprovalPrompter:
+    def __init__(self, mode: PermissionMode, channel: WebChannel):
+        self.mode = mode
+        self.escalated = False
+        self._channel = channel
+        self._pending: dict[str, dict[str, object]] = {}
+        self._lock = threading.Lock()
+
+    def ask(
+        self,
+        tool_name: str,
+        tool_input: str,
+        required: PermissionMode,
+        current: PermissionMode,
+    ) -> PermissionOutcome:
+        request_id = f"perm_{uuid.uuid4().hex[:12]}"
+        event = threading.Event()
+        pending = {"event": event, "allowed": False, "scope": "once"}
+        with self._lock:
+            self._pending[request_id] = pending
+        self._channel._broadcast(
+            OutboundEvent(
+                kind=OutboundKind.PERMISSION_REQUEST,
+                data={
+                    "request_id": request_id,
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "required_permission": required.value,
+                    "current_permission": current.value,
+                },
+            )
+        )
+        event.wait()
+        with self._lock:
+            pending = self._pending.pop(request_id, pending)
+        if not bool(pending.get("allowed")):
+            return PermissionOutcome.deny("user denied")
+        if pending.get("scope") == "session":
+            self.mode = required
+            self.escalated = True
+        return PermissionOutcome.allow()
+
+    def respond(self, request_id: str, allowed: bool, scope: str) -> dict[str, object]:
+        with self._lock:
+            pending = self._pending.get(request_id)
+            if pending is None:
+                return {"ok": False, "error": "permission request is not pending"}
+            pending["allowed"] = allowed
+            pending["scope"] = scope
+            event = pending.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+        return {"ok": True}
 
 
 def _handle_served_slash_command(
@@ -554,8 +611,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         workspace_dir=workspace,
     )
     channel = _build_channel(args.channel, args)
+    web_prompter = None
 
     if isinstance(channel, WebChannel):
+        web_prompter = WebApprovalPrompter(permission_mode, channel)
+        channel.permission_responder = web_prompter.respond
+
         def _web_session_messages() -> list[dict[str, object]]:
             messages: list[dict[str, object]] = []
             for msg in engine.session.messages:
@@ -644,6 +705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sink,
                     use_streaming=use_streaming,
                     permission_mode=requested_permission_mode,
+                    prompter=web_prompter if isinstance(channel, WebChannel) else None,
                 )
             except KeyboardInterrupt:
                 break

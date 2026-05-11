@@ -51,6 +51,12 @@ class SessionSwitchRequest(BaseModel):
     session_id: str = Field(min_length=1)
 
 
+class PermissionResponseRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    allowed: bool
+    scope: str = "once"
+
+
 @dataclass
 class WebChannelConfig:
     host: str = "127.0.0.1"
@@ -73,6 +79,7 @@ class WebChannel(Channel):
         self._list_sessions: Callable[[], dict[str, object]] | None = None
         self._new_session: Callable[[], dict[str, object]] | None = None
         self._resume_session: Callable[[str], dict[str, object]] | None = None
+        self.permission_responder: Callable[[str, bool, str], dict[str, object]] | None = None
         self.app = self._build_app()
 
     # -- Channel ------------------------------------------------------------
@@ -139,6 +146,12 @@ class WebChannel(Channel):
             if self._resume_session is None:
                 return {"ok": False, "error": "session handlers are not ready"}
             return self._resume_session(req.session_id)
+
+        @app.post("/api/permissions/respond")
+        def permissions_respond(req: PermissionResponseRequest) -> dict[str, object]:
+            if self.permission_responder is None:
+                return {"ok": False, "error": "permission API is not configured"}
+            return self.permission_responder(req.request_id, req.allowed, req.scope)
 
         @app.post("/api/chat", response_model=ChatResponse)
         def chat(req: ChatRequest) -> ChatResponse:

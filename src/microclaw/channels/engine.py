@@ -158,6 +158,7 @@ class ChannelEngine:
         *,
         use_streaming: bool = True,
         permission_mode: PermissionMode | None = None,
+        prompter: object | None = None,
     ) -> None:
         """Run one agent turn for the given inbound message.
 
@@ -174,7 +175,7 @@ class ChannelEngine:
         """
         request_id = f"req_{uuid.uuid4().hex[:12]}"
         effective_permission_mode = permission_mode or self.permission_mode
-        prompter = ChannelDenyPrompter(effective_permission_mode)
+        prompter = prompter or ChannelDenyPrompter(effective_permission_mode)
         original_permission_mode = self.permission_mode
         self.permission_mode = effective_permission_mode
         runtime = self._build_runtime()

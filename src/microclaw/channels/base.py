@@ -51,6 +51,7 @@ class OutboundKind(str, Enum):
     THINKING_DELTA = "thinking_delta"
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
+    PERMISSION_REQUEST = "permission_request"
     FINAL = "final"
     ERROR = "error"
     TURN_END = "turn_end"
