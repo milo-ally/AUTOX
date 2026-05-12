@@ -31,6 +31,7 @@ from microclaw.channels.transports.wechat import WechatChannel
 from microclaw.permissions import PermissionMode, PermissionOutcome
 from microclaw.providers import create_provider, resolve_model_alias
 from microclaw.session import (
+    delete_session,
     list_sessions,
     load_session_by_reference,
     new_session,
@@ -666,10 +667,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine.team_manager.model = engine.model
             return _session_payload()
 
+        def _delete_web_session(session_id: str) -> dict[str, object]:
+            if session_id == engine.session.session_id:
+                return {"ok": False, "error": "cannot delete the current session"}
+            deleted = delete_session(session_id)
+            if not deleted:
+                return {"ok": False, "error": f"session '{session_id}' not found"}
+            return {
+                "ok": True,
+                "deleted": session_id,
+                "sessions": list_sessions(),
+            }
+
         channel.set_session_handlers(
             list_sessions=_session_payload,
             new_session=_new_web_session,
             resume_session=_resume_web_session,
+            delete_session=_delete_web_session,
         )
 
     use_streaming = (not args.no_stream) and channel.supports_streaming

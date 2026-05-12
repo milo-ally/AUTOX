@@ -51,6 +51,10 @@ class SessionSwitchRequest(BaseModel):
     session_id: str = Field(min_length=1)
 
 
+class SessionDeleteRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+
+
 class PermissionResponseRequest(BaseModel):
     request_id: str = Field(min_length=1)
     allowed: bool
@@ -79,6 +83,7 @@ class WebChannel(Channel):
         self._list_sessions: Callable[[], dict[str, object]] | None = None
         self._new_session: Callable[[], dict[str, object]] | None = None
         self._resume_session: Callable[[str], dict[str, object]] | None = None
+        self._delete_session: Callable[[str], dict[str, object]] | None = None
         self.permission_responder: Callable[[str, bool, str], dict[str, object]] | None = None
         self.runtime_interrupter: Callable[[], dict[str, object]] | None = None
         self.app = self._build_app()
@@ -102,10 +107,12 @@ class WebChannel(Channel):
         list_sessions: Callable[[], dict[str, object]],
         new_session: Callable[[], dict[str, object]],
         resume_session: Callable[[str], dict[str, object]],
+        delete_session: Callable[[str], dict[str, object]] | None = None,
     ) -> None:
         self._list_sessions = list_sessions
         self._new_session = new_session
         self._resume_session = resume_session
+        self._delete_session = delete_session
 
     def stop(self) -> None:
         self._stopped.set()
@@ -147,6 +154,12 @@ class WebChannel(Channel):
             if self._resume_session is None:
                 return {"ok": False, "error": "session handlers are not ready"}
             return self._resume_session(req.session_id)
+
+        @app.post("/api/sessions/delete")
+        def sessions_delete(req: SessionDeleteRequest) -> dict[str, object]:
+            if self._delete_session is None:
+                return {"ok": False, "error": "session handlers are not ready"}
+            return self._delete_session(req.session_id)
 
         @app.post("/api/permissions/respond")
         def permissions_respond(req: PermissionResponseRequest) -> dict[str, object]:

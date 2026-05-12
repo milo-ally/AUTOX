@@ -227,6 +227,16 @@ def _load_latest_session() -> Session:
     return load_session(str(session_files[0]))
 
 
+def delete_session(session_id: str) -> bool:
+    """Delete a session file by session ID. Returns True if deleted."""
+    session_dir = _ensure_session_dir()
+    candidate = session_dir / f"{session_id}.jsonl"
+    if candidate.is_file():
+        candidate.unlink()
+        return True
+    return False
+
+
 def list_sessions() -> list[dict[str, Any]]:
     """List all managed sessions."""
     session_dir = _ensure_session_dir()
