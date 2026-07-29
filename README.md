@@ -2,10 +2,6 @@
 
 A personal AI assistant CLI — a Python rewrite of [OpenClaw](https://github.com/ultraworkers/claw-code) — supporting **Anthropic**, **OpenAI**, **xAI**, **DashScope**, and **DeepSeek** providers.
 
-## Web Frontend
-
-The standalone web frontend lives at [milo-ally/microclaw-frontend](https://github.com/milo-ally/microclaw-frontend).
-
 ## Quickstart
 
 ### Install from GitHub
